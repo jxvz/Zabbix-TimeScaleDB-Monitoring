@@ -1,0 +1,122 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: c3e79f6980c24bd7bc95fdc015b1a287
+      name: TimeScaleDB
+  templates:
+    - uuid: ad5d8fe231dd46478494be5337bb4e80
+      template: 'TimeScaleDB Monitoring'
+      name: 'TimeScaleDB Monitoring'
+      groups:
+        - name: TimeScaleDB
+      items:
+        - uuid: dc8d845a6ff743e8b272b90394ab51e1
+          name: 'Tamanho total do banco Zabbix'
+          type: ODBC
+          key: 'db.odbc.select[zabbix.db.size,ZabbixTSDB]'
+          units: B
+          params: 'SELECT pg_database_size(''zabbix'');'
+          username: '{$PG.USER}'
+          password: '{$PG.PASSWORD}'
+          tags:
+            - tag: TimeScaleDB
+              value: SizeDatabase
+      discovery_rules:
+        - uuid: 580d040b6e1a4d8898bdf286d82b028d
+          name: 'Discovery Timescale Hypertables'
+          type: ODBC
+          key: 'db.odbc.discovery[timescale.discovery,ZabbixTSDB]'
+          delay: 1h
+          params: |
+            SELECT hypertable_name AS table_name
+            FROM timescaledb_information.hypertables;
+          username: '{PG.USER}'
+          password: '{PG.PASSWORD}'
+          item_prototypes:
+            - uuid: b5441d69d8414567ba0e888da34edb25
+              name: '[{#TABLE_NAME}] Chunks comprimidas'
+              type: ODBC
+              key: 'db.odbc.select[timescale.chunks.compressed.{#TABLE_NAME},ZabbixTSDB]'
+              params: |
+                SELECT COUNT(*) FROM timescaledb_information.chunks
+                WHERE hypertable_name = '{#TABLE_NAME}' AND is_compressed = true;
+              username: '{$PG.USER}'
+              password: '{$PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Chunks
+            - uuid: 69c9163d5204431fba2caf2602cace3a
+              name: '[{#TABLE_NAME}] Chunks não comprimidas'
+              type: ODBC
+              key: 'db.odbc.select[timescale.chunks.uncompressed.{#TABLE_NAME},ZabbixTSDB]'
+              params: |
+                SELECT COUNT(*) FROM timescaledb_information.chunks
+                WHERE hypertable_name = '{#TABLE_NAME}' AND is_compressed = false;
+              username: '{$PG.USER}'
+              password: '{$PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Chunks
+            - uuid: ebf35b5e08bd41df88a27d1e54172549
+              name: 'Tamanho da tabela {#TABLE_NAME}'
+              type: ODBC
+              key: 'db.odbc.select[timescale.size.{#TABLE_NAME},ZabbixTSDB]'
+              delay: 15m
+              units: B
+              params: |
+                SELECT hypertable_size(format('%I.%I', hypertable_schema, hypertable_name))
+                FROM timescaledb_information.hypertables
+                WHERE hypertable_name = '{#TABLE_NAME}';
+              username: '{PG.USER}'
+              password: '{PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Tabela
+        - uuid: 5a06757fce6444a4a2e5573204c5e5b6
+          name: 'Discovery Timescale Jobs'
+          type: ODBC
+          key: 'db.odbc.discovery[timescale.jobs.discovery,ZabbixTSDB]'
+          delay: 1h
+          params: 'SELECT job_id, proc_name FROM timescaledb_information.jobs ORDER BY job_id;'
+          username: '{$PG.USER}'
+          password: '{$PG.PASSWORD}'
+          lifetime_type: DELETE_NEVER
+          lifetime: '0'
+          item_prototypes:
+            - uuid: 1cf4edffbbe64b86b6f6be66c025bb47
+              name: '[Job {#JOB_ID}] {#PROC_NAME} - Total de falhas'
+              type: ODBC
+              key: 'db.odbc.select[timescale.job.failures.{#JOB_ID},ZabbixTSDB]'
+              params: 'SELECT total_failures FROM timescaledb_information.job_stats WHERE job_id = ''{#JOB_ID}''::bigint'
+              username: '{$PG.USER}'
+              password: '{$PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Jobs
+            - uuid: ba21d98431614343a7793eb947ad4e3d
+              name: '[Job {#JOB_ID}] {#PROC_NAME} - Último run OK'
+              type: ODBC
+              key: 'db.odbc.select[timescale.job.laststatus.{#JOB_ID},ZabbixTSDB]'
+              params: 'SELECT CASE WHEN last_run_status = ''Success'' THEN 1 ELSE 0 END FROM timescaledb_information.job_stats WHERE job_id = ''{#JOB_ID}''::bigint'
+              username: '{$PG.USER}'
+              password: '{$PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Jobs
+            - uuid: 921d4d9b19b14f8c8a3c9ab036bd2fb1
+              name: '[Job {#JOB_ID}] {#PROC_NAME} - Próxima execução'
+              type: ODBC
+              key: 'db.odbc.select[timescale.job.nextstart.{#JOB_ID},ZabbixTSDB]'
+              units: unixtime
+              params: |
+                SELECT EXTRACT(EPOCH FROM next_start)::bigint
+                FROM timescaledb_information.job_stats
+                WHERE job_id = '{#JOB_ID}'::bigint
+              username: '{$PG.USER}'
+              password: '{$PG.PASSWORD}'
+              tags:
+                - tag: TimeScaleDB
+                  value: Jobs
+      tags:
+        - tag: DB
+          value: TimeScaleDB
