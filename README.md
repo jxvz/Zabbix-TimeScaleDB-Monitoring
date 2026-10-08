@@ -1,0 +1,377 @@
+<div align="center">
+
+# 🐘 TimescaleDB Monitoring — Zabbix Template
+
+### Monitoramento de PostgreSQL + TimescaleDB via ODBC
+
+*Tamanhos · Compressão de chunks · Background jobs · Saúde do banco*
+
+<br>
+
+[![Zabbix](https://img.shields.io/badge/Zabbix-6.0%2B-D40000?style=for-the-badge&logo=zabbix&logoColor=white)](https://www.zabbix.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![TimescaleDB](https://img.shields.io/badge/TimescaleDB-2.24-FDB515?style=for-the-badge&logo=timescale&logoColor=black)](https://www.timescale.com/)
+
+[![Collection](https://img.shields.io/badge/coleta-ODBC-00A971?style=flat-square)](#-setup)
+[![No Agent](https://img.shields.io/badge/no%20host-sem%20agent-success?style=flat-square)](#-setup)
+[![No Sudo](https://img.shields.io/badge/sem-sudo-success?style=flat-square)](#-setup)
+[![Version](https://img.shields.io/badge/vers%C3%A3o-1.1-blue?style=flat-square)](#)
+
+</div>
+
+---
+
+## 📋 Índice
+
+<table>
+<tr>
+<td>
+
+- [🎯 Visão geral](#-visão-geral)
+- [🧩 Arquitetura](#-arquitetura)
+- [✅ Requisitos](#-requisitos)
+- [⚙️ Setup](#-setup)
+- [🔑 Macros](#-macros)
+
+</td>
+<td>
+
+- [📊 Itens coletados](#-itens-coletados)
+- [🔔 Triggers sugeridas](#-triggers-sugeridas)
+- [🛠️ Troubleshooting](#️-troubleshooting)
+- [💡 Achados operacionais](#-achados-operacionais)
+- [📦 Resumo dos objetos](#-resumo-dos-objetos)
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🎯 Visão geral
+
+> Monitora um banco **PostgreSQL + TimescaleDB** (por exemplo, o *backend* do próprio Zabbix) através de **ODBC**, diretamente a partir do Zabbix Server/Proxy.
+
+Coleta, de forma automática por *low-level discovery* (LLD):
+
+| | Métrica |
+|:---:|---|
+| 📏 | **Tamanho** de cada hypertable e do banco inteiro |
+| 🗜️ | **Compressão** — chunks comprimidas vs. não comprimidas |
+| ⚙️ | **Background jobs** — falhas, status e próxima execução |
+
+> [!TIP]
+> Esta abordagem substitui a antiga baseada em **UserParameter com `sudo -u postgres`** (superusuário). O ODBC elimina o agent no host do banco, o `sudo` e o superusuário, e move a SQL para dentro dos itens — versionável via *export* do template.
+
+---
+
+## 🧩 Arquitetura
+
+```mermaid
+flowchart LR
+    subgraph ZBX["🖥️ Zabbix Server"]
+        DSN["🔌 DSN ODBC<br/>ZabbixTSDB"]
+        D1["🔍 LLD Hypertables"]
+        D2["🔍 LLD Jobs"]
+        I0["📏 Tamanho do banco"]
+    end
+    subgraph PG["🐘 PostgreSQL + TimescaleDB"]
+        ROLE["👤 zbx_monitor<br/>(pg_monitor)"]
+        TSDB[("📚 timescaledb_information")]
+    end
+
+    DSN -->|Basic auth| ROLE
+    ROLE --> TSDB
+    D1 -->|db.odbc.discovery| DSN
+    D2 -->|db.odbc.discovery| DSN
+    I0 -->|db.odbc.select| DSN
+    D1 --> P1["📊 Tamanho / Chunks por tabela"]
+    D2 --> P2["📊 Falhas / Status / Próxima exec. por job"]
+```
+
+| Componente | Papel |
+|---|---|
+| 🔌 **DSN `ZabbixTSDB`** | Conexão ODBC do Server ao banco |
+| 👤 **Role `zbx_monitor`** | Usuário de leitura (`pg_monitor`) |
+| 🔍 **Discoveries** | Descobrem hypertables e jobs automaticamente |
+| 📊 **Prototypes** | Um conjunto de itens por tabela / por job |
+
+---
+
+## ✅ Requisitos
+
+| Requisito | Versão / Detalhe |
+|---|---|
+| ![Zabbix](https://img.shields.io/badge/-Zabbix-D40000?logo=zabbix&logoColor=white) | 6.0+ (itens `db.odbc.*`, pré-processamento JS/JSONPath) |
+| ![TimescaleDB](https://img.shields.io/badge/-TimescaleDB-FDB515?logo=timescale&logoColor=black) | 2.24 (schema `timescaledb_information`) |
+| ![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?logo=postgresql&logoColor=white) | Extensão `timescaledb` ativa |
+| 🔌 **Driver ODBC** | `PostgreSQL Unicode` (`psqlodbcw.so`) no Server/Proxy |
+| 🌐 **Rede** | Server alcança o banco na porta `5432` |
+
+---
+
+## ⚙️ Setup
+
+### 1️⃣ Role de monitoramento no PostgreSQL
+
+Conectado como **`postgres`**, **dentro do banco monitorado** (ex.: `zabbix`):
+
+```sql
+CREATE ROLE zbx_monitor LOGIN PASSWORD 'senha_forte';
+GRANT pg_monitor TO zbx_monitor;
+GRANT USAGE ON SCHEMA timescaledb_information TO zbx_monitor;
+```
+
+<details>
+<summary>🌐 <b>Banco remoto?</b> Ajustes de acesso</summary>
+
+<br>
+
+No `postgresql.conf`:
+```conf
+listen_addresses = '*'
+```
+
+No `pg_hba.conf` (autoriza o IP do Zabbix):
+```conf
+host    zabbix    zbx_monitor    <IP_DO_ZABBIX>/32    scram-sha-256
+```
+
+Recarregue e libere a porta no firewall:
+```bash
+systemctl reload postgresql
+# firewall: liberar 5432/TCP para o IP do Zabbix
+```
+
+Teste de porta a partir do Zabbix:
+```bash
+nc -zv <IP_DO_BANCO> 5432
+```
+</details>
+
+### 2️⃣ DSN ODBC no Zabbix Server
+
+No `/etc/odbc.ini`:
+
+```ini
+[ZabbixTSDB]
+Description = Zabbix PostgreSQL TimescaleDB
+Driver      = PostgreSQL Unicode
+Servername  = 192.168.3.52
+Port        = 5432
+Database    = zabbix
+Parse       = 0
+```
+
+> [!IMPORTANT]
+> **`Parse = 0` é obrigatório.** Desliga a interpretação de escapes ODBC; sem ele, qualquer `{ }` na SQL dispara `ODBC escape convert error`. Após editar, **reinicie**: `systemctl restart zabbix-server`.
+
+Teste a conexão ponta a ponta:
+
+```bash
+isql -v ZabbixTSDB zbx_monitor senha_forte
+```
+
+### 3️⃣ Vincular o template
+
+Vincule **`TimeScaleDB Monitoring`** ao host do banco e preencha as [macros](#-macros).
+
+---
+
+## 🔑 Macros
+
+| Macro | Descrição | Padrão |
+|---|---|:---:|
+| `{$PG.USER}` | Role de monitoramento | `zbx_monitor` |
+| `{$PG.PASSWORD}` | 🔒 Senha da role — marcar como **Secret text** | — |
+| `{$PG.DSN}` | Nome do DSN ODBC | `ZabbixTSDB` |
+
+> [!WARNING]
+> A sintaxe de macro **exige o cifrão**: `{$PG.USER}` ✅ — e **não** `{PG.USER}` ❌. Sem o `$`, o Zabbix envia o texto literal e o PostgreSQL recusa com *`password authentication failed for user "{PG.USER}"`*.
+
+---
+
+## 📊 Itens coletados
+
+### 📏 Item — Tamanho total do banco
+
+> Item **normal** (não prototype) — valor único do banco.
+
+| Campo | Valor |
+|---|---|
+| **Key** | `db.odbc.select[zabbix.db.size,ZabbixTSDB]` |
+| **Tipo** | Numeric (unsigned) · `B` |
+
+```sql
+SELECT pg_database_size('zabbix');
+```
+
+### 🔍 Regras de descoberta (LLD)
+
+| Nome | Key | Macros geradas |
+|---|---|---|
+| **Discovery Hypertables** | `db.odbc.discovery[timescale.discovery,ZabbixTSDB]` | `{#TABLE_NAME}` |
+| **Discovery Jobs** | `db.odbc.discovery[timescale.jobs.discovery,ZabbixTSDB]` | `{#JOB_ID}`, `{#PROC_NAME}` |
+
+```sql
+-- Hypertables  (a coluna table_name vira {#TABLE_NAME} automaticamente)
+SELECT hypertable_name AS table_name
+FROM timescaledb_information.hypertables;
+
+-- Jobs
+SELECT job_id, proc_name
+FROM timescaledb_information.jobs
+ORDER BY job_id;
+```
+
+> [!NOTE]
+> O `db.odbc.discovery` gera as macros LLD **a partir dos nomes das colunas** do resultado — sem `json_build_object` manual.
+
+### 📈 Protótipos de item
+
+<table>
+<tr><th>Ícone</th><th>Nome</th><th>Key</th><th>Tipo</th></tr>
+<tr><td align="center">📏</td><td>Tamanho da tabela <code>{#TABLE_NAME}</code></td><td><code>timescale.size.{#TABLE_NAME}</code></td><td>unsigned · B</td></tr>
+<tr><td align="center">🗜️</td><td>[<code>{#TABLE_NAME}</code>] Chunks comprimidas</td><td><code>timescale.chunks.compressed.{#TABLE_NAME}</code></td><td>unsigned</td></tr>
+<tr><td align="center">📦</td><td>[<code>{#TABLE_NAME}</code>] Chunks não comprimidas</td><td><code>timescale.chunks.uncompressed.{#TABLE_NAME}</code></td><td>unsigned</td></tr>
+<tr><td align="center">❌</td><td>[Job <code>{#JOB_ID}</code>] Total de falhas</td><td><code>timescale.job.failures.{#JOB_ID}</code></td><td>unsigned</td></tr>
+<tr><td align="center">✅</td><td>[Job <code>{#JOB_ID}</code>] Último run OK</td><td><code>timescale.job.laststatus.{#JOB_ID}</code></td><td>unsigned</td></tr>
+<tr><td align="center">⏰</td><td>[Job <code>{#JOB_ID}</code>] Próxima execução</td><td><code>timescale.job.nextstart.{#JOB_ID}</code></td><td>unsigned · unixtime</td></tr>
+</table>
+
+<sub>As keys acima são o 1º parâmetro de <code>db.odbc.select[&lt;key&gt;,ZabbixTSDB]</code>.</sub>
+
+```sql
+-- 📏 Tamanho da tabela
+SELECT hypertable_size(format('%I.%I', hypertable_schema, hypertable_name))
+FROM timescaledb_information.hypertables
+WHERE hypertable_name = '{#TABLE_NAME}';
+
+-- 🗜️ Chunks comprimidas
+SELECT COUNT(*) FROM timescaledb_information.chunks
+WHERE hypertable_name = '{#TABLE_NAME}' AND is_compressed = true;
+
+-- 📦 Chunks não comprimidas
+SELECT COUNT(*) FROM timescaledb_information.chunks
+WHERE hypertable_name = '{#TABLE_NAME}' AND is_compressed = false;
+
+-- ❌ Total de falhas do job
+SELECT total_failures FROM timescaledb_information.job_stats
+WHERE job_id = '{#JOB_ID}'::bigint;
+
+-- ✅ Último run OK (1 = Success, 0 = outro)
+SELECT CASE WHEN last_run_status = 'Success' THEN 1 ELSE 0 END
+FROM timescaledb_information.job_stats
+WHERE job_id = '{#JOB_ID}'::bigint;
+
+-- ⏰ Próxima execução (timestamp Unix → Units=unixtime)
+SELECT EXTRACT(EPOCH FROM next_start)::bigint
+FROM timescaledb_information.job_stats
+WHERE job_id = '{#JOB_ID}'::bigint;
+```
+
+> [!IMPORTANT]
+> 🔧 **Macros em SQL + ODBC.** Macros **numéricas** (`{#JOB_ID}`) vão **entre aspas com cast** → `'{#JOB_ID}'::bigint` (o ODBC trata como string e não escapa as chaves; o Postgres converte de volta). Macros de **texto** (`{#TABLE_NAME}`) vão entre aspas simples normalmente.
+
+---
+
+## 🔔 Triggers sugeridas
+
+| | Nome | Expressão | Severidade |
+|:---:|---|---|:---:|
+| 🔴 | Job falhou no último run | `last(…/timescale.job.laststatus.{#JOB_ID})=0` | `Warning` |
+| 🟠 | Job atrasado (>1h) | `(now()-last(…/timescale.job.nextstart.{#JOB_ID}))>3600` | `Warning` |
+| 🔵 | Banco cresceu +1 GB em 1h | `change(…/zabbix.db.size)>1073741824` | `Info` |
+| 🟡 | Chunks antigos sem compressão | `last(…/timescale.chunks.uncompressed.{#TABLE_NAME})>N` | `Warning` |
+
+<sub>Substitua <code>…</code> por <code>/&lt;host&gt;/db.odbc.select[</code> e feche com <code>,ZabbixTSDB]</code>.</sub>
+
+> [!TIP]
+> A trigger de **job atrasado** compara `now()` com o `next_start`: se a próxima execução já passou e o item não avançou, o job não está rodando como esperado — pega casos que o `last_run_status` sozinho não detecta.
+
+---
+
+## 🛠️ Troubleshooting
+
+| 🚨 Sintoma | 🔧 Solução |
+|---|---|
+| `ODBC escape convert error` | `Parse = 0` no DSN + restart do server; macro numérica com `'{#MACRO}'::bigint`. |
+| `password authentication failed for user "{PG.USER}"` | Macro **sem cifrão** — use `{$PG.USER}` / `{$PG.PASSWORD}`. |
+| `no pg_hba.conf entry for host` | Libere o IP do Zabbix no `pg_hba.conf` + `reload`. |
+| `permission denied to create role` | Conecte como **postgres**, não como `zabbix`. |
+| `schema "timescaledb_information" does not exist` | Rode o `GRANT` **dentro do banco** `zabbix` (`\c zabbix`). |
+| Item `Not supported` | DSN ausente no host coletor, ou alias da coluna ≠ macro LLD. |
+| `must contain at least one low-level discovery macro` | Item sem `{#…}` criado como protótipo → crie como **item normal**. |
+| `failed to start job ("Columnstore Policy")` | Contenção de workers → ver [Achados](#-achados-operacionais). |
+| `total_failures` alto, jobs OK | Contador **acumulado** — normal → ver [Achados](#-achados-operacionais). |
+
+---
+
+## 💡 Achados operacionais
+
+> Aprendizados reais levantados durante a implantação.
+
+### ❌➡️✅ `total_failures` é acumulado — não use como alerta
+
+O campo soma **todas** as falhas desde a criação do job, incluindo erros antigos já fora da `job_errors` (retenção limitada). Valor alto **não** indica problema atual.
+
+> ✔️ Para alertar: `last_run_status = 0` ou **job atrasado**. Para falhas novas: monitore o **incremento**, não o valor absoluto.
+
+### 🗜️ Compressão só após `compress_after`
+
+As hypertables usam `compress_after ≈ 7 dias` (`612000s`). Chunks mais novos aparecem como **não comprimidos** — comportamento **esperado**.
+
+> ✔️ Trigger de "sem compressão" deve considerar apenas chunks **mais velhos** que `compress_after`, senão vira falso positivo.
+
+### ⚙️ `failed to start job` → `max_worker_processes` subdimensionado
+
+Falhas esporádicas com `failed to start job ("Columnstore Policy")` = **contenção de background workers**: vários jobs disparam no mesmo horário sem processos suficientes.
+
+```sql
+SHOW timescaledb.max_background_workers;   -- ex.: 16
+SHOW max_worker_processes;                 -- precisa ser MAIOR + folga
+```
+
+| ❌ Antes | ✅ Depois |
+|:---:|:---:|
+| `max_worker_processes = 4` | `max_worker_processes = 24` |
+
+> ⚠️ Exige **restart** do PostgreSQL (cuidado se for o backend do Zabbix). Atenção ao **`postgresql.auto.conf`**, que sobrescreve o `postgresql.conf` — se o valor persistir, use `ALTER SYSTEM SET max_worker_processes = 24;`.
+
+---
+
+## 📦 Resumo dos objetos
+
+```
+📂 TimeScaleDB Monitoring
+├── 🔌 DSN ................ ZabbixTSDB  (Parse=0)
+├── 🔑 Macros ............ {$PG.USER}  {$PG.PASSWORD}  {$PG.DSN}
+│
+├── 📏 Item .............. db.odbc.select[zabbix.db.size,ZabbixTSDB]
+│
+├── 🔍 LLD Hypertables ... db.odbc.discovery[timescale.discovery,ZabbixTSDB]
+│   ├── 📏 timescale.size.{#TABLE_NAME}
+│   ├── 🗜️ timescale.chunks.compressed.{#TABLE_NAME}
+│   └── 📦 timescale.chunks.uncompressed.{#TABLE_NAME}
+│
+└── 🔍 LLD Jobs .......... db.odbc.discovery[timescale.jobs.discovery,ZabbixTSDB]
+    ├── ❌ timescale.job.failures.{#JOB_ID}
+    ├── ✅ timescale.job.laststatus.{#JOB_ID}
+    └── ⏰ timescale.job.nextstart.{#JOB_ID}
+```
+
+---
+
+<div align="center">
+
+<sub>
+
+**TimescaleDB Monitoring** · Template Zabbix via ODBC · **v1.1**
+
+![Zabbix](https://img.shields.io/badge/-Zabbix-D40000?style=flat-square&logo=zabbix&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![TimescaleDB](https://img.shields.io/badge/-TimescaleDB-FDB515?style=flat-square&logo=timescale&logoColor=black)
+
+</sub>
+
+</div>
